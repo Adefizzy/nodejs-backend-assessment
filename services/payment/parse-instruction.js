@@ -165,3 +165,159 @@ function parseExecuteBy(instruction) {
   return dateStr;
 }
 
+
+/**
+ * Parses DEBIT format instruction
+ * Format: DEBIT [amount] [currency] FROM ACCOUNT [account_id] FOR CREDIT TO ACCOUNT [account_id] [ON [date]]
+ */
+function parseDebitFormat(instruction) {
+  // Find required keywords in order
+  const debitIndex = findKeywordIndex(instruction, 'debit');
+  if (debitIndex < 0) return null;
+
+  const fromIndex = findKeywordIndex(instruction, 'from', debitIndex);
+  if (fromIndex < 0) return null;
+
+  const accountIndex1 = findKeywordIndex(instruction, 'account', fromIndex);
+  if (accountIndex1 < 0) return null;
+
+  const forIndex = findKeywordIndex(instruction, 'for', accountIndex1);
+  if (forIndex < 0) return null;
+
+  const creditIndex = findKeywordIndex(instruction, 'credit', forIndex);
+  if (creditIndex < 0) return null;
+
+  const toIndex = findKeywordIndex(instruction, 'to', creditIndex);
+  if (toIndex < 0) return null;
+
+  const accountIndex2 = findKeywordIndex(instruction, 'account', toIndex);
+  if (accountIndex2 < 0) return null;
+
+  // Extract amount and currency (between DEBIT and FROM)
+  // The format is: DEBIT [amount] [currency] FROM
+  const amountStart = debitIndex + 5; // Position after "DEBIT "
+  
+  // Skip any leading spaces
+  let amountStartPos = amountStart;
+  while (amountStartPos < fromIndex && instruction[amountStartPos] === ' ') {
+    amountStartPos += 1;
+  }
+  
+  // Find the first space after the amount (this separates amount from currency)
+  let amountEndPos = amountStartPos;
+  while (amountEndPos < fromIndex && instruction[amountEndPos] !== ' ') {
+    amountEndPos += 1;
+  }
+  
+  if (amountEndPos <= amountStartPos || amountEndPos >= fromIndex) return null;
+
+  const amount = parseAmount(instruction, amountStartPos, amountEndPos);
+  if (amount === null) return null;
+
+  // Find currency start (skip the space after amount)
+  let currencyStart = amountEndPos;
+  while (currencyStart < fromIndex && instruction[currencyStart] === ' ') {
+    currencyStart += 1;
+  }
+  
+  const currency = parseCurrency(instruction, currencyStart, fromIndex);
+  if (!currency) return null;
+
+  // Extract debit account (after first ACCOUNT)
+  const debitAccount = parseAccountId(instruction, accountIndex1);
+  if (!debitAccount) return null;
+
+  // Extract credit account (after second ACCOUNT)
+  const creditAccount = parseAccountId(instruction, accountIndex2);
+  if (!creditAccount) return null;
+
+  // Extract execute_by date (optional)
+  const executeBy = parseExecuteBy(instruction);
+
+  return {
+    type: 'DEBIT',
+    amount,
+    currency,
+    debit_account: debitAccount,
+    credit_account: creditAccount,
+    execute_by: executeBy,
+  };
+}
+
+/**
+ * Parses CREDIT format instruction
+ * Format: CREDIT [amount] [currency] TO ACCOUNT [account_id] FOR DEBIT FROM ACCOUNT [account_id] [ON [date]]
+ */
+function parseCreditFormat(instruction) {
+  // Find required keywords in order
+  const creditIndex = findKeywordIndex(instruction, 'credit');
+  if (creditIndex < 0) return null;
+
+  const toIndex = findKeywordIndex(instruction, 'to', creditIndex);
+  if (toIndex < 0) return null;
+
+  const accountIndex1 = findKeywordIndex(instruction, 'account', toIndex);
+  if (accountIndex1 < 0) return null;
+
+  const forIndex = findKeywordIndex(instruction, 'for', accountIndex1);
+  if (forIndex < 0) return null;
+
+  const debitIndex = findKeywordIndex(instruction, 'debit', forIndex);
+  if (debitIndex < 0) return null;
+
+  const fromIndex = findKeywordIndex(instruction, 'from', debitIndex);
+  if (fromIndex < 0) return null;
+
+  const accountIndex2 = findKeywordIndex(instruction, 'account', fromIndex);
+  if (accountIndex2 < 0) return null;
+
+  // Extract amount and currency (between CREDIT and TO)
+  // The format is: CREDIT [amount] [currency] TO
+  const amountStart = creditIndex + 6; // Position after "CREDIT "
+  
+  // Skip any leading spaces
+  let amountStartPos = amountStart;
+  while (amountStartPos < toIndex && instruction[amountStartPos] === ' ') {
+    amountStartPos += 1;
+  }
+  
+  // Find the first space after the amount (this separates amount from currency)
+  let amountEndPos = amountStartPos;
+  while (amountEndPos < toIndex && instruction[amountEndPos] !== ' ') {
+    amountEndPos += 1;
+  }
+  
+  if (amountEndPos <= amountStartPos || amountEndPos >= toIndex) return null;
+
+  const amount = parseAmount(instruction, amountStartPos, amountEndPos);
+  if (amount === null) return null;
+
+  // Find currency start (skip the space after amount)
+  let currencyStart = amountEndPos;
+  while (currencyStart < toIndex && instruction[currencyStart] === ' ') {
+    currencyStart += 1;
+  }
+  
+  const currency = parseCurrency(instruction, currencyStart, toIndex);
+  if (!currency) return null;
+
+  // Extract credit account (after first ACCOUNT - this is the destination)
+  const creditAccount = parseAccountId(instruction, accountIndex1);
+  if (!creditAccount) return null;
+
+  // Extract debit account (after second ACCOUNT - this is the source)
+  const debitAccount = parseAccountId(instruction, accountIndex2);
+  if (!debitAccount) return null;
+
+  // Extract execute_by date (optional)
+  const executeBy = parseExecuteBy(instruction);
+
+  return {
+    type: 'CREDIT',
+    amount,
+    currency,
+    debit_account: debitAccount,
+    credit_account: creditAccount,
+    execute_by: executeBy,
+  };
+}

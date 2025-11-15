@@ -2,7 +2,23 @@
  * Validates and processes payment transactions
  */
 
+const validator = require('@app-core/validator');
+const { appLogger } = require('@app-core/logger');
+const PaymentMessages = require('@app/messages/payment');
 const parseInstruction = require('./parse-instruction');
+
+// Validation spec
+const spec = `root {
+  accounts[] {
+    id string
+    balance number
+    currency string
+  }
+  instruction string
+}`;
+
+// Parse spec once at module level
+const parsedSpec = validator.parse(spec);
 
 // Status codes
 const STATUS_CODES = {
@@ -72,8 +88,33 @@ function getAccountsInOrder(accounts, debitAccountId, creditAccountId) {
 /**
  * Main transaction processor
  */
-function processTransaction(serviceData) {
-  const { accounts, instruction } = serviceData;
+async function processTransaction(serviceData, options = {}) {
+  let response;
+
+  // Validate input FIRST (as per README guidelines)
+  let data;
+  try {
+    data = validator.validate(serviceData, parsedSpec);
+  } catch (error) {
+    // Return proper error format for validation failures
+    appLogger.warn({ error: error.message }, 'validation-error');
+    return {
+      type: null,
+      amount: null,
+      currency: null,
+      debit_account: null,
+      credit_account: null,
+      execute_by: null,
+      status: 'failed',
+      status_reason: error.message || 'Invalid request format',
+      status_code: STATUS_CODES.MALFORMED_INSTRUCTION,
+      accounts: [],
+    };
+  }
+
+  const { accounts, instruction } = data;
+
+  appLogger.info({ instruction }, 'processing-transaction');
 
   // Parse the instruction
   const parsed = parseInstruction(instruction);
@@ -86,7 +127,8 @@ function processTransaction(serviceData) {
     parsed.debit_account === null &&
     parsed.credit_account === null
   ) {
-    return {
+    appLogger.warn({ instruction }, 'unparseable-instruction');
+    response = {
       type: null,
       amount: null,
       currency: null,
@@ -94,7 +136,7 @@ function processTransaction(serviceData) {
       credit_account: null,
       execute_by: null,
       status: 'failed',
-      status_reason: 'Malformed instruction: unable to parse keywords',
+      status_reason: PaymentMessages.MALFORMED_INSTRUCTION,
       status_code: STATUS_CODES.UNPARSEABLE_INSTRUCTION,
       accounts: [],
     };
@@ -110,12 +152,13 @@ function processTransaction(serviceData) {
   } = parsed;
 
   // Validate amount
-  if (amount === null || amount <= 0) {
+  if (!response && (amount === null || amount <= 0)) {
     const accountResponses = getAccountsInOrder(accounts, debitAccountId, creditAccountId).map(
       (acc) => createAccountResponse(acc, acc.balance)
     );
 
-    return {
+    appLogger.warn({ amount }, 'invalid-amount');
+    response = {
       type,
       amount: null,
       currency,
@@ -123,19 +166,20 @@ function processTransaction(serviceData) {
       credit_account: creditAccountId,
       execute_by: executeBy,
       status: 'failed',
-      status_reason: 'Invalid amount. Amount must be a positive integer',
+      status_reason: PaymentMessages.INVALID_AMOUNT,
       status_code: STATUS_CODES.INVALID_AMOUNT,
       accounts: accountResponses,
     };
   }
 
   // Validate currency
-  if (!currency || SUPPORTED_CURRENCIES.indexOf(currency) < 0) {
+  if (!response && (!currency || SUPPORTED_CURRENCIES.indexOf(currency) < 0)) {
     const accountResponses = getAccountsInOrder(accounts, debitAccountId, creditAccountId).map(
       (acc) => createAccountResponse(acc, acc.balance)
     );
 
-    return {
+    appLogger.warn({ currency }, 'unsupported-currency');
+    response = {
       type,
       amount,
       currency,
@@ -143,151 +187,181 @@ function processTransaction(serviceData) {
       credit_account: creditAccountId,
       execute_by: executeBy,
       status: 'failed',
-      status_reason: 'Unsupported currency. Only NGN, USD, GBP, and GHS are supported',
+      status_reason: PaymentMessages.UNSUPPORTED_CURRENCY,
       status_code: STATUS_CODES.UNSUPPORTED_CURRENCY,
       accounts: accountResponses,
     };
   }
 
   // Validate accounts exist
-  const debitAccount = findAccount(accounts, debitAccountId);
-  const creditAccount = findAccount(accounts, creditAccountId);
+  if (!response) {
+    const debitAccount = findAccount(accounts, debitAccountId);
+    const creditAccount = findAccount(accounts, creditAccountId);
 
-  if (!debitAccount || !creditAccount) {
-    const accountResponses = getAccountsInOrder(accounts, debitAccountId, creditAccountId).map(
-      (acc) => createAccountResponse(acc, acc.balance)
-    );
+    if (!debitAccount || !creditAccount) {
+      const accountResponses = getAccountsInOrder(accounts, debitAccountId, creditAccountId).map(
+        (acc) => createAccountResponse(acc, acc.balance)
+      );
 
-    return {
-      type,
-      amount,
-      currency,
-      debit_account: debitAccountId,
-      credit_account: creditAccountId,
-      execute_by: executeBy,
-      status: 'failed',
-      status_reason: 'Account not found',
-      status_code: STATUS_CODES.ACCOUNT_NOT_FOUND,
-      accounts: accountResponses,
-    };
-  }
+      appLogger.warn({ debitAccountId, creditAccountId }, 'account-not-found');
+      response = {
+        type,
+        amount,
+        currency,
+        debit_account: debitAccountId,
+        credit_account: creditAccountId,
+        execute_by: executeBy,
+        status: 'failed',
+        status_reason: PaymentMessages.ACCOUNT_NOT_FOUND,
+        status_code: STATUS_CODES.ACCOUNT_NOT_FOUND,
+        accounts: accountResponses,
+      };
+    } else {
+      // Validate same account
+      if (debitAccountId === creditAccountId) {
+        const accountResponses = [createAccountResponse(debitAccount, debitAccount.balance)];
 
-  // Validate same account
-  if (debitAccountId === creditAccountId) {
-    const accountResponses = [createAccountResponse(debitAccount, debitAccount.balance)];
-
-    return {
-      type,
-      amount,
-      currency,
-      debit_account: debitAccountId,
-      credit_account: creditAccountId,
-      execute_by: executeBy,
-      status: 'failed',
-      status_reason: 'Debit and credit accounts cannot be the same',
-      status_code: STATUS_CODES.SAME_ACCOUNT,
-      accounts: accountResponses,
-    };
-  }
-
-  // Validate currency mismatch
-  const debitCurrency = debitAccount.currency.toUpperCase();
-  const creditCurrency = creditAccount.currency.toUpperCase();
-
-  if (debitCurrency !== currency || creditCurrency !== currency) {
-    const accountResponses = getAccountsInOrder(accounts, debitAccountId, creditAccountId).map(
-      (acc) => createAccountResponse(acc, acc.balance)
-    );
-
-    return {
-      type,
-      amount,
-      currency,
-      debit_account: debitAccountId,
-      credit_account: creditAccountId,
-      execute_by: executeBy,
-      status: 'failed',
-      status_reason: 'Currency mismatch between accounts',
-      status_code: STATUS_CODES.CURRENCY_MISMATCH,
-      accounts: accountResponses,
-    };
-  }
-
-  // Check if transaction should be pending (future date)
-  const isPending = executeBy && isFutureDate(executeBy);
-
-  if (isPending) {
-    const accountResponses = getAccountsInOrder(accounts, debitAccountId, creditAccountId).map(
-      (acc) => createAccountResponse(acc, acc.balance)
-    );
-
-    return {
-      type,
-      amount,
-      currency,
-      debit_account: debitAccountId,
-      credit_account: creditAccountId,
-      execute_by: executeBy,
-      status: 'pending',
-      status_reason: 'Transaction scheduled for future execution',
-      status_code: STATUS_CODES.PENDING,
-      accounts: accountResponses,
-    };
-  }
-
-  // Validate sufficient funds
-  if (debitAccount.balance < amount) {
-    const accountResponses = getAccountsInOrder(accounts, debitAccountId, creditAccountId).map(
-      (acc) => createAccountResponse(acc, acc.balance)
-    );
-
-    return {
-      type,
-      amount,
-      currency,
-      debit_account: debitAccountId,
-      credit_account: creditAccountId,
-      execute_by: executeBy,
-      status: 'failed',
-      status_reason: 'Insufficient funds',
-      status_code: STATUS_CODES.INSUFFICIENT_FUNDS,
-      accounts: accountResponses,
-    };
-  }
-
-  // Execute transaction
-  const debitBalanceBefore = debitAccount.balance;
-  const creditBalanceBefore = creditAccount.balance;
-
-  debitAccount.balance -= amount;
-  creditAccount.balance += amount;
-
-  // Create response with accounts in request order
-  const accountResponses = getAccountsInOrder(accounts, debitAccountId, creditAccountId).map(
-    (acc) => {
-      if (acc.id === debitAccountId) {
-        return createAccountResponse(acc, debitBalanceBefore);
+        appLogger.warn({ debitAccountId, creditAccountId }, 'same-account-error');
+        response = {
+          type,
+          amount,
+          currency,
+          debit_account: debitAccountId,
+          credit_account: creditAccountId,
+          execute_by: executeBy,
+          status: 'failed',
+          status_reason: PaymentMessages.SAME_ACCOUNT_ERROR,
+          status_code: STATUS_CODES.SAME_ACCOUNT,
+          accounts: accountResponses,
+        };
       }
-      if (acc.id === creditAccountId) {
-        return createAccountResponse(acc, creditBalanceBefore);
+
+      // Validate currency mismatch
+      if (!response) {
+        const debitCurrency = debitAccount.currency.toUpperCase();
+        const creditCurrency = creditAccount.currency.toUpperCase();
+
+        if (debitCurrency !== currency || creditCurrency !== currency) {
+          const accountResponses = getAccountsInOrder(
+            accounts,
+            debitAccountId,
+            creditAccountId
+          ).map((acc) => createAccountResponse(acc, acc.balance));
+
+          appLogger.warn({ debitCurrency, creditCurrency, currency }, 'currency-mismatch');
+          response = {
+            type,
+            amount,
+            currency,
+            debit_account: debitAccountId,
+            credit_account: creditAccountId,
+            execute_by: executeBy,
+            status: 'failed',
+            status_reason: PaymentMessages.CURRENCY_MISMATCH,
+            status_code: STATUS_CODES.CURRENCY_MISMATCH,
+            accounts: accountResponses,
+          };
+        }
       }
-      return createAccountResponse(acc, acc.balance);
+
+      // Check if transaction should be pending (future date)
+      if (!response) {
+        const isPending = executeBy && isFutureDate(executeBy);
+
+        if (isPending) {
+          const accountResponses = getAccountsInOrder(
+            accounts,
+            debitAccountId,
+            creditAccountId
+          ).map((acc) => createAccountResponse(acc, acc.balance));
+
+          appLogger.info({ executeBy }, 'transaction-pending');
+          response = {
+            type,
+            amount,
+            currency,
+            debit_account: debitAccountId,
+            credit_account: creditAccountId,
+            execute_by: executeBy,
+            status: 'pending',
+            status_reason: PaymentMessages.TRANSACTION_PENDING,
+            status_code: STATUS_CODES.PENDING,
+            accounts: accountResponses,
+          };
+        }
+      }
+
+      // Validate sufficient funds
+      if (!response) {
+        if (debitAccount.balance < amount) {
+          const accountResponses = getAccountsInOrder(
+            accounts,
+            debitAccountId,
+            creditAccountId
+          ).map((acc) => createAccountResponse(acc, acc.balance));
+
+          appLogger.warn(
+            { debitAccountId, balance: debitAccount.balance, amount },
+            'insufficient-funds'
+          );
+          response = {
+            type,
+            amount,
+            currency,
+            debit_account: debitAccountId,
+            credit_account: creditAccountId,
+            execute_by: executeBy,
+            status: 'failed',
+            status_reason: PaymentMessages.INSUFFICIENT_FUNDS,
+            status_code: STATUS_CODES.INSUFFICIENT_FUNDS,
+            accounts: accountResponses,
+          };
+        }
+      }
+
+      // Execute transaction
+      if (!response) {
+        const debitBalanceBefore = debitAccount.balance;
+        const creditBalanceBefore = creditAccount.balance;
+
+        debitAccount.balance -= amount;
+        creditAccount.balance += amount;
+
+        // Create response with accounts in request order
+        const accountResponses = getAccountsInOrder(accounts, debitAccountId, creditAccountId).map(
+          (acc) => {
+            if (acc.id === debitAccountId) {
+              return createAccountResponse(acc, debitBalanceBefore);
+            }
+            if (acc.id === creditAccountId) {
+              return createAccountResponse(acc, creditBalanceBefore);
+            }
+            return createAccountResponse(acc, acc.balance);
+          }
+        );
+
+        appLogger.info(
+          { type, amount, currency, debitAccountId, creditAccountId },
+          'transaction-successful'
+        );
+        response = {
+          type,
+          amount,
+          currency,
+          debit_account: debitAccountId,
+          credit_account: creditAccountId,
+          execute_by: executeBy,
+          status: 'successful',
+          status_reason: PaymentMessages.TRANSACTION_SUCCESSFUL,
+          status_code: STATUS_CODES.SUCCESS,
+          accounts: accountResponses,
+        };
+      }
     }
-  );
+  }
 
-  return {
-    type,
-    amount,
-    currency,
-    debit_account: debitAccountId,
-    credit_account: creditAccountId,
-    execute_by: executeBy,
-    status: 'successful',
-    status_reason: 'Transaction executed successfully',
-    status_code: STATUS_CODES.SUCCESS,
-    accounts: accountResponses,
-  };
+  // Single exit point
+  return response;
 }
 
 module.exports = processTransaction;
-

@@ -6,47 +6,13 @@ module.exports = createHandler({
   method: 'post',
   middlewares: [],
   async handler(rc, helpers) {
-    const { accounts, instruction } = rc.body;
+    // Prepare service payload
+    const payload = {
+      ...rc.body,
+    };
 
-    // Basic validation
-    if (!accounts || !Array.isArray(accounts)) {
-      return {
-        status: helpers.http_statuses.HTTP_400_BAD_REQUEST,
-        data: {
-          type: null,
-          amount: null,
-          currency: null,
-          debit_account: null,
-          credit_account: null,
-          execute_by: null,
-          status: 'failed',
-          status_reason: 'Invalid request: accounts must be an array',
-          status_code: 'SY01',
-          accounts: [],
-        },
-      };
-    }
-
-    if (!instruction || typeof instruction !== 'string') {
-      return {
-        status: helpers.http_statuses.HTTP_400_BAD_REQUEST,
-        data: {
-          type: null,
-          amount: null,
-          currency: null,
-          debit_account: null,
-          credit_account: null,
-          execute_by: null,
-          status: 'failed',
-          status_reason: 'Invalid request: instruction must be a string',
-          status_code: 'SY01',
-          accounts: [],
-        },
-      };
-    }
-
-    // Process the transaction
-    const result = processTransaction({ accounts, instruction });
+    // Call service (validation happens in service)
+    const result = await processTransaction(payload);
 
     return {
       status: helpers.http_statuses.HTTP_200_OK,

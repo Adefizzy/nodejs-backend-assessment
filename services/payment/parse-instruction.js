@@ -321,3 +321,44 @@ function parseCreditFormat(instruction) {
     execute_by: executeBy,
   };
 }
+
+
+/**
+ * Main parser function
+ */
+function parseInstruction(instruction) {
+  if (!instruction || typeof instruction !== 'string') {
+    return {
+      type: null,
+      amount: null,
+      currency: null,
+      debit_account: null,
+      credit_account: null,
+      execute_by: null,
+    };
+  }
+
+  // Try DEBIT format first
+  const debitResult = parseDebitFormat(instruction);
+  if (debitResult) {
+    return debitResult;
+  }
+
+  // Try CREDIT format
+  const creditResult = parseCreditFormat(instruction);
+  if (creditResult) {
+    return creditResult;
+  }
+
+  // If neither format matches, return null values
+  return {
+    type: null,
+    amount: null,
+    currency: null,
+    debit_account: null,
+    credit_account: null,
+    execute_by: null,
+  };
+}
+
+module.exports = parseInstruction;
